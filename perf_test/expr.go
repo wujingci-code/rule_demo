@@ -1,212 +1,142 @@
-package cel
+package perf_test
 
 import (
 	"fmt"
 	"log"
-	"math/big"
+	"reflect"
 	"strings"
+	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	etypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/common/types/ref"
+	"github.com/expr-lang/expr"
+	"github.com/expr-lang/expr/vm"
 )
 
-type EvmTx struct {
-	ChainId              string `json:"chainId"`
-	Data                 string `json:"data"`
-	From                 string `json:"from"`
-	GasLimit             string `json:"gas"`
-	GasPrice             string `json:"gasPrice"`
-	MaxFeePerGas         string `json:"maxFeePerGas"`
-	MaxPriorityFeePerGas string `json:"maxPriorityFeePerGas"`
-	Nonce                string `json:"nonce"`
-	To                   string `json:"to"`
-	TxType               int32  `json:"type"`
-	Value                string `json:"value"`
+// CompiledRule wraps a precompiled expr.Program
+type CompiledRule struct {
+	Name    string
+	Action  string
+	Program *vm.Program
 }
 
-func txDecode(rawTx string) EvmTx {
-	txBytes, err := hexutil.Decode(rawTx)
-	if err != nil {
-		log.Fatalf("invalid tx hex: %v", err)
-	}
-	var tx etypes.Transaction
-	if err := rlp.DecodeBytes(txBytes, &tx); err != nil {
-		log.Fatalf("RLP decode error: %v", err)
-	}
-
-	chainID := big.NewInt(0)
-	if tx.ChainId() != nil {
-		chainID = tx.ChainId()
-	}
-
-	signer := etypes.LatestSignerForChainID(chainID)
-	fromAddr, err := etypes.Sender(signer, &tx)
-	if err != nil {
-		log.Fatalf("recover sender error: %v", err)
-	}
-
-	return EvmTx{
-		ChainId: fmt.Sprintf("0x%s", chainID.Text(16)),
-		To:      tx.To().Hex(),
-		From:    fromAddr.Hex(),
-		Data:    hexutil.Encode(tx.Data()),
-	}
+// Engine precompiles rules once and evaluates multiple times
+type Engine struct {
+	rules []CompiledRule
 }
 
-func lowerFn(arg ref.Val) ref.Val {
-	s, ok := arg.Value().(string)
-	if !ok {
-		return types.NewErr("lower: 参数类型错误，期望 string")
-	}
-	return types.String(strings.ToLower(s))
-}
-
-func substrFn(args ...ref.Val) ref.Val {
-	if len(args) != 3 {
-		return types.NewErr("substr: 需要3个参数")
-	}
-	s, ok := args[0].Value().(string)
-	if !ok {
-		return types.NewErr("substr: 第1个参数类型错误，期望string")
-	}
-	start, ok := args[1].Value().(int64)
-	if !ok {
-		return types.NewErr("substr: 第2个参数类型错误，期望int")
-	}
-	end, ok := args[2].Value().(int64)
-	if !ok {
-		return types.NewErr("substr: 第3个参数类型错误，期望int")
+// NewEngine compiles the rule set into expr.Program instances
+func NewEngine() *Engine {
+	// Base environment template: zero-values and function refs
+	baseEnv := map[string]interface{}{
+		"chainId": "",
+		"data":    "",
+		"from":    "",
+		"to":      "",
+		"lower":   lower,
+		"substr":  substr,
 	}
 
-	if start < 0 {
-		start = 0
-	}
-	if end > int64(len(s)) {
-		end = int64(len(s))
-	}
-	if start > end {
-		return types.String("")
-	}
-	return types.String(s[start:end])
-}
-
-func ruleCheck(tx EvmTx) (decision string, matched string) {
-	type Rule struct {
+	// Define raw rules
+	raw := []struct {
 		Name      string
 		Condition string
 		Action    string
-	}
-	rules := []Rule{
-		{
-			Name:      "limit to bsc",
-			Condition: `chainId != "0x38"`,
-			Action:    "FORBID",
-		},
-		{
-			Name:      "transfer to self",
-			Condition: `lower(to) == lower(from) && data == ""`,
-			Action:    "ALLOW",
-		},
-		{
-			Name: "allowed dex router methods",
-			Condition: `
-                lower(to) == "0xb300000b72deaeb607a12d5f54773d1c19c7028d" &&
-                lower(substr(data,0,10)) in ["0xdad12b6c","0xe5e8894b","0x810c705b"]
-            `,
-			Action: "ALLOW",
-		},
-		{
-			Name: "allowance receipts",
-			Condition: `
-                lower(substr(data,0,10)) == "0x095ea7b3" &&
-                lower(substr(data,32,72)) in ["2bd6471e79b2f5a723731c36837242df4d845ce8","b300000b72deaeb607a12d5f54773d1c19c7028d"]
-            `,
-			Action: "ALLOW",
-		},
-		{
-			Name:   "default",
-			Action: "FORBID",
-		},
+	}{
+		{"limit to bsc", `chainId != "0x38"`, "FORBID"},
+		{"transfer to self", `lower(to) == lower(from) && data == ""`, "ALLOW"},
+		{"allowed dex router methods",
+			`lower(to) == "0xb300000b72deaeb607a12d5f54773d1c19c7028d" &&
+             lower(substr(data,0,10)) in ["0xdad12b6c","0xe5e8894b","0x810c705b"]`,
+			"ALLOW"},
+		{"allowance receipts",
+			`lower(substr(data,0,10)) == "0x095ea7b3" &&
+             lower(substr(data,32,72)) in ["2bd6471e79b2f5a723731c36837242df4d845ce8",
+                                          "b300000b72deaeb607a12d5f54773d1c19c7028d"]`,
+			"ALLOW"},
+		{"default", `true`, "FORBID"},
 	}
 
-	env, err := cel.NewEnv(
-		cel.Variable("chainId", cel.StringType),
-		cel.Variable("to", cel.StringType),
-		cel.Variable("from", cel.StringType),
-		cel.Variable("data", cel.StringType),
-
-		cel.Function("lower",
-			cel.Overload("lower_string",
-				[]*cel.Type{cel.StringType}, cel.StringType,
-				cel.UnaryBinding(lowerFn),
-			),
-		),
-		cel.Function("substr",
-			cel.Overload("substr_string_int_int",
-				[]*cel.Type{cel.StringType, cel.IntType, cel.IntType}, cel.StringType,
-				cel.FunctionBinding(substrFn),
-			),
-		),
-	)
-	if err != nil {
-		log.Fatalf("创建 CEL 环境失败: %v", err)
-	}
-
-	envMap := structToMap(tx)
-
-	for _, rule := range rules {
-		if rule.Condition == "" {
-			return rule.Action, rule.Name
-		}
-
-		ast, issues := env.Compile(rule.Condition)
-		if issues.Err() != nil {
-			log.Printf("编译规则 %q 错误: %v", rule.Name, issues.Err())
-			continue
-		}
-
-		prg, err := env.Program(ast)
+	var compiled []CompiledRule
+	for _, r := range raw {
+		prog, err := expr.Compile(r.Condition, expr.Env(baseEnv))
 		if err != nil {
-			log.Printf("构建规则 %q 执行器失败: %v", rule.Name, err)
-			continue
+			log.Fatalf("compile rule %q error: %v", r.Name, err)
 		}
-
-		out, _, err := prg.Eval(map[string]interface{}{
-			"chainId": envMap["chainId"],
-			"to":      envMap["to"],
-			"from":    envMap["from"],
-			"data":    envMap["data"],
-		})
-		if err != nil {
-			log.Printf("执行规则 %q 失败: %v", rule.Name, err)
-			continue
-		}
-
-		pass, ok := out.Value().(bool)
-		if !ok {
-			log.Printf("规则 %q 返回值不是 bool", rule.Name)
-			continue
-		}
-
-		if pass {
-			return rule.Action, rule.Name
-		}
+		compiled = append(compiled, CompiledRule{r.Name, r.Action, prog})
 	}
-
-	return "FORBID", "default"
+	return &Engine{rules: compiled}
 }
 
-func EVM() {
-	case1()
-	case2()
-	case3()
+// Evaluate decodes rawTx, builds env, and applies precompiled rules
+type EvalResult struct {
+	Decision    string
+	MatchedRule string
 }
 
-func case1() {
+func (e *Engine) Evaluate(rawTx string) EvalResult {
+	tx := txDecode(rawTx)
+	// Build evaluation env
+	env := structToMap(tx)
+	env["lower"] = lower
+	env["substr"] = substr
+
+	for _, rule := range e.rules {
+		out, err := expr.Run(rule.Program, env)
+		if err != nil {
+			log.Printf("evaluate rule %q error: %v", rule.Name, err)
+			continue
+		}
+		pass, ok := out.(bool)
+		if ok && pass {
+			return EvalResult{Decision: rule.Action, MatchedRule: rule.Name}
+		}
+	}
+	return EvalResult{Decision: "FORBID", MatchedRule: "default"}
+}
+
+// structToMap converts struct EvmTx to map for expr env
+func structToMap(s interface{}) map[string]interface{} {
+	v := reflect.ValueOf(s)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	t := v.Type()
+
+	out := make(map[string]interface{}, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := field.Tag.Get("json")
+		if name == "" {
+			name = field.Name
+		}
+		out[name] = v.Field(i).Interface()
+	}
+	return out
+}
+
+// lower and substr functions usable in expr DSL
+func lower(s string) string {
+	return strings.ToLower(s)
+}
+
+func substr(s string, start, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(s) {
+		end = len(s)
+	}
+	if start > end {
+		return ""
+	}
+	return s[start:end]
+}
+
+func ExprPerfRun() {
+	start := time.Now() // 记录开始时间
+	engine := NewEngine()
 	/*
 		EVM TX
 
@@ -216,15 +146,8 @@ func case1() {
 		to: 0x87d211f3B97f6ef06D899102A5fb647ABc22c17C,
 		value: 0
 	*/
-	rawTx := "0xf86f8302e51a850e33e222008252089487d211f3b97f6ef06d899102a5fb647abc22c17c8804269ddd8451c0008026a01d2e58a7559a66a221cb225154b996461e32a690d527ec9581c3c6022de8eb17a0372c424f45a7f08d5acb9a2de84982c8b154b6ad00041071a60e9d26c6211477"
+	rawTx1 := "0xf86f8302e51a850e33e222008252089487d211f3b97f6ef06d899102a5fb647abc22c17c8804269ddd8451c0008026a01d2e58a7559a66a221cb225154b996461e32a690d527ec9581c3c6022de8eb17a0372c424f45a7f08d5acb9a2de84982c8b154b6ad00041071a60e9d26c6211477"
 
-	evmTX := txDecode(rawTx)
-
-	decision, matched := ruleCheck(evmTX)
-	log.Printf("Decision: %s (matched rule: %s)", decision, matched)
-}
-
-func case2() {
 	/*
 		Allowed dex router methods
 
@@ -234,16 +157,9 @@ func case2() {
 		to: 0xb300000b72DEAEb607a12d5f54773D1C19c7028d,
 		value: 0
 	*/
-	rawTx :=
+	rawTx2 :=
 		"0xf90b1482022984068e77808307a12094b300000b72deaeb607a12d5f54773d1c19c7028d87038d7ea4c68000b90aa4dad12b6c0000000000000000000000003d90f66b534dd8482b181e24655a9e8265316be9000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038d7ea4c68000000000000000000000000000ff7d6a96ae471bbcd7713af9cb1feeb16cf56b4100000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000009c4b80c2f090000000000000000000000000000000000000000000000000000000000000000000000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000000000ff7d6a96ae471bbcd7713af9cb1feeb16cf56b4100000000000000000000000000000000000000000000000000038d7ea4c68000000000000000000000000000000000000000000000000000700a83b9635ed07100000000000000000000000000000000000000000000000000000000685b71830000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000009a0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000038d7ea4c68000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000002e0000000000000000000000000000000000000000000000000000000000000056000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000001200000000000000000000000000000000000000000000000000000000000000160000000000000000000000000bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c0000000000000000000000000000000000000000000000000000000000000001000000000000000000000000ca852767b43a395ac1dd54737193eba5e20c78bd0000000000000000000000000000000000000000000000000000000000000001000000000000000000000000ca852767b43a395ac1dd54737193eba5e20c78bd000000000000000000000000000000000000000000000000000000000000000180000000000000000000271062fcb3c1794fb95bd8b1a97f6ad5d8a7e4943a1e0000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000060000000000000000000000000bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c0000000000000000000000002170ed0880ac9a755fd29b2688956bd959f933f8000000000000000000000000000000000000000000000000000000000000006400000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000001600000000000000000000000002170ed0880ac9a755fd29b2688956bd959f933f800000000000000000000000000000000000000000000000000000000000000010000000000000000000000005b620eabc2aba77d2bc4092f6d1fad6515872c3400000000000000000000000000000000000000000000000000000000000000010000000000000000000000005b620eabc2aba77d2bc4092f6d1fad6515872c340000000000000000000000000000000000000000000000000000000000000001000000000000000000002710b125aa15ad943d96e813e4a06d0c34716f897e260000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000600000000000000000000000002170ed0880ac9a755fd29b2688956bd959f933f800000000000000000000000055d398326f99059ff775485246999027b3197955000000000000000000000000000000000000000000000000000000000000006400000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000e00000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000016000000000000000000000000055d398326f99059ff775485246999027b31979550000000000000000000000000000000000000000000000000000000000000001000000000000000000000000ca852767b43a395ac1dd54737193eba5e20c78bd0000000000000000000000000000000000000000000000000000000000000001000000000000000000000000ca852767b43a395ac1dd54737193eba5e20c78bd0000000000000000000000000000000000000000000000000000000000000001000000000000000000002710380aadf63d84d3a434073f1d5d95f02fb23d52280000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000006000000000000000000000000055d398326f99059ff775485246999027b3197955000000000000000000000000ff7d6a96ae471bbcd7713af9cb1feeb16cf56b4100000000000000000000000000000000000000000000000000000000000000640000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008194a02d5e4a47bf3b1a3f463620bd6cacc19ec04adda8f446fd73e77bb8148430138ea070cf48795bdc35ef8a10e88d1fbc4c8d995260a4f0f63e9ff6ea60789c2d1b45"
-	evmTX := txDecode(rawTx)
 
-	decision, matched := ruleCheck(evmTX)
-
-	log.Printf("Decision: %s (matched rule: %s)\n", decision, matched)
-}
-
-func case3() {
 	/*
 		default
 
@@ -253,10 +169,14 @@ func case3() {
 		to: 0x0000000000000000000000000000000000001000,
 		value: 0
 	*/
-	rawTx := "0xf893827e7480887fffffffffffffff9400000000000000000000000000000000000010008708a98b62048c1fa4f340fa01000000000000000000000000ec3c2d51b8a6ca9cf244f709ea3ade0c7b21238f8194a077cdf97272edf854538949358b3e0c8a273e3916240cddc9dca7c368ced57589a076576f0adfb81c42760b8a8733601287a234283bd641344da5842c66f23f3aff"
-	evmTX := txDecode(rawTx)
+	rawTx3 := "0xf893827e7480887fffffffffffffff9400000000000000000000000000000000000010008708a98b62048c1fa4f340fa01000000000000000000000000ec3c2d51b8a6ca9cf244f709ea3ade0c7b21238f8194a077cdf97272edf854538949358b3e0c8a273e3916240cddc9dca7c368ced57589a076576f0adfb81c42760b8a8733601287a234283bd641344da5842c66f23f3aff"
 
-	decision, matched := ruleCheck(evmTX)
+	for i := 0; i < 10000; i++ {
+		engine.Evaluate(rawTx1)
+		engine.Evaluate(rawTx2)
+		engine.Evaluate(rawTx3)
+	}
 
-	log.Printf("Decision: %s (matched rule: %s)\n", decision, matched)
+	elapsed := time.Since(start) // 计算耗时
+	fmt.Printf("expr perf执行耗时: %s\n", elapsed)
 }

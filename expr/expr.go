@@ -6,7 +6,6 @@ import (
 	"math/big"
 	"reflect"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -173,12 +172,9 @@ func substr(s string, start, end int) string {
 }
 
 func Expr() {
-	start := time.Now() // 记录开始时间
 	case1()
 	case2()
 	case3()
-	elapsed := time.Since(start) // 计算耗时
-	fmt.Printf("执行耗时: %s\n", elapsed)
 }
 
 func case1() {

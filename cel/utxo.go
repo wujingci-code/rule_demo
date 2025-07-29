@@ -57,24 +57,6 @@ func DecodePSBTHex(hexStr string) (*Packet, error) {
 	return pkt, nil
 }
 
-// // structToMap: 把 Packet 转成 map[string]interface{}
-// func structToMap(s interface{}) map[string]interface{} {
-// 	v := reflect.ValueOf(s)
-// 	if v.Kind() == reflect.Ptr {
-// 		v = v.Elem()
-// 	}
-// 	t := v.Type()
-// 	m := make(map[string]interface{}, t.NumField())
-// 	for i := 0; i < t.NumField(); i++ {
-// 		f := t.Field(i)
-// 		if !f.IsExported() {
-// 			continue
-// 		}
-// 		m[f.Name] = v.Field(i).Interface()
-// 	}
-// 	return m
-// }
-
 func sumFn(args ...ref.Val) ref.Val {
 	if len(args) != 1 {
 		return types.NewErr("sum: 需要1个参数，列表或数组")
