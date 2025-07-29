@@ -79,17 +79,17 @@ func sumFn(args ...ref.Val) ref.Val {
 		case int32:
 			sum += float64(v)
 		case int64:
-			sum += float64(v) / 1e8
+			sum += float64(v)
 		case uint:
-			sum += float64(v) / 1e8
+			sum += float64(v)
 		case uint8:
-			sum += float64(v) / 1e8
+			sum += float64(v)
 		case uint16:
-			sum += float64(v) / 1e8
+			sum += float64(v)
 		case uint32:
-			sum += float64(v) / 1e8
+			sum += float64(v)
 		case uint64:
-			sum += float64(v) / 1e8
+			sum += float64(v)
 		case float32:
 			sum += float64(v)
 		case float64:
@@ -99,7 +99,7 @@ func sumFn(args ...ref.Val) ref.Val {
 			if ev.Kind() == reflect.Struct {
 				fld := ev.FieldByName("Value")
 				if fld.IsValid() && fld.CanInt() {
-					sum += float64(fld.Int()) / 1e8
+					sum += float64(fld.Int())
 					continue
 				}
 			}
@@ -133,8 +133,8 @@ func UTXO() {
 
 	// 3. 写规则、编译、执行
 	cond := `
-      sum(packet.Inputs) <= 10.0 &&
-      (sum(packet.Inputs) - sum(packet.Outputs)) <= 0.1
+      sum(packet.Inputs)/100000000.0 <= 10.0 &&
+      (sum(packet.Inputs)/100000000.0 - sum(packet.Outputs)/100000000.0) <= 0.1
     `
 	ast, iss := env.Compile(cond)
 	if iss.Err() != nil {
