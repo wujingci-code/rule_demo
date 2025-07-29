@@ -1,4 +1,4 @@
-package cel
+package cel_demo
 
 import (
 	"bytes"
@@ -118,7 +118,7 @@ func UTXO() {
 	pktMap := structToMap(pkt)
 
 	env, err := cel.NewEnv(
-		cel.Variable("packet", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("packet", cel.DynType),
 		cel.Function("sum",
 			cel.Overload("sum_list_dyn",
 				[]*cel.Type{cel.ListType(cel.DynType)},

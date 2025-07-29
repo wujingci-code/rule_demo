@@ -1,16 +1,15 @@
-package expr
+package cel_demo
 
 import (
 	"fmt"
 	"log"
 	"math/big"
-	"reflect"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/types"
+	etypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/expr-lang/expr"
+	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/ext"
 )
 
 type EvmTx struct {
@@ -27,34 +26,12 @@ type EvmTx struct {
 	Value                string `json:"value"`
 }
 
-func structToMap(s interface{}) map[string]interface{} {
-	v := reflect.ValueOf(s)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	t := v.Type()
-
-	out := make(map[string]interface{}, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if !field.IsExported() {
-			continue
-		}
-		name := field.Tag.Get("json")
-		if name == "" {
-			name = field.Name
-		}
-		out[name] = v.Field(i).Interface()
-	}
-	return out
-}
-
 func txDecode(rawTx string) EvmTx {
 	txBytes, err := hexutil.Decode(rawTx)
 	if err != nil {
 		log.Fatalf("invalid tx hex: %v", err)
 	}
-	var tx types.Transaction
+	var tx etypes.Transaction
 	if err := rlp.DecodeBytes(txBytes, &tx); err != nil {
 		log.Fatalf("RLP decode error: %v", err)
 	}
@@ -64,8 +41,8 @@ func txDecode(rawTx string) EvmTx {
 		chainID = tx.ChainId()
 	}
 
-	signer := types.LatestSignerForChainID(chainID)
-	fromAddr, err := types.Sender(signer, &tx)
+	signer := etypes.LatestSignerForChainID(chainID)
+	fromAddr, err := etypes.Sender(signer, &tx)
 	if err != nil {
 		log.Fatalf("recover sender error: %v", err)
 	}
@@ -92,22 +69,22 @@ func ruleCheck(tx EvmTx) (decision string, matched string) {
 		},
 		{
 			Name:      "transfer to self",
-			Condition: `lower(to) == lower(from) && data == ""`,
+			Condition: `to.lowerAscii() == from.lowerAscii() && data == ""`,
 			Action:    "ALLOW",
 		},
 		{
 			Name: "allowed dex router methods",
 			Condition: `
-                lower(to) == "0xb300000b72deaeb607a12d5f54773d1c19c7028d" &&
-                lower(substr(data,0,10)) in ["0xdad12b6c","0xe5e8894b","0x810c705b"]
+                to.lowerAscii() == "0xb300000b72deaeb607a12d5f54773d1c19c7028d" &&
+                data.substring(0,10).lowerAscii() in ["0xdad12b6c","0xe5e8894b","0x810c705b"]
             `,
 			Action: "ALLOW",
 		},
 		{
 			Name: "allowance receipts",
 			Condition: `
-                lower(substr(data,0,10)) == "0x095ea7b3" &&
-                lower(substr(data,32,72)) in ["2bd6471e79b2f5a723731c36837242df4d845ce8","b300000b72deaeb607a12d5f54773d1c19c7028d"]
+                data.substring(0,10).lowerAscii() == "0x095ea7b3" &&
+                data.substring(32,72).lowerAscii() in ["2bd6471e79b2f5a723731c36837242df4d845ce8","b300000b72deaeb607a12d5f54773d1c19c7028d"]
             `,
 			Action: "ALLOW",
 		},
@@ -117,61 +94,62 @@ func ruleCheck(tx EvmTx) (decision string, matched string) {
 		},
 	}
 
+	env, err := cel.NewEnv(
+		ext.Strings(), // string extension
+		cel.Variable("chainId", cel.StringType),
+		cel.Variable("to", cel.StringType),
+		cel.Variable("from", cel.StringType),
+		cel.Variable("data", cel.StringType),
+	)
+	if err != nil {
+		log.Fatalf("创建 CEL 环境失败: %v", err)
+	}
+
+	envMap := structToMap(tx)
+
 	for _, rule := range rules {
 		if rule.Condition == "" {
 			return rule.Action, rule.Name
 		}
 
-		env := structToMap(tx)
-		env["lower"] = lower
-		env["substr"] = substr
-
-		program, err := expr.Compile(rule.Condition, expr.Env(env))
-		if err != nil {
-			log.Printf("compile rule %q error: %v", rule.Name, err)
+		ast, issues := env.Compile(rule.Condition)
+		if issues.Err() != nil {
+			log.Printf("编译规则 %q 错误: %v", rule.Name, issues.Err())
 			continue
 		}
 
-		output, err := expr.Run(program, env)
+		prg, err := env.Program(ast)
 		if err != nil {
-			log.Printf("eval rule %q error: %v", rule.Name, err)
+			log.Printf("构建规则 %q 执行器失败: %v", rule.Name, err)
 			continue
 		}
 
-		pass, ok := output.(bool)
+		out, _, err := prg.Eval(map[string]interface{}{
+			"chainId": envMap["chainId"],
+			"to":      envMap["to"],
+			"from":    envMap["from"],
+			"data":    envMap["data"],
+		})
+		if err != nil {
+			log.Printf("执行规则 %q 失败: %v", rule.Name, err)
+			continue
+		}
+
+		pass, ok := out.Value().(bool)
 		if !ok {
-			log.Printf("rule %q did not return bool", rule.Name)
+			log.Printf("规则 %q 返回值不是 bool", rule.Name)
 			continue
 		}
 
 		if pass {
-			decision = rule.Action
-			matched = rule.Name
-			break
+			return rule.Action, rule.Name
 		}
 	}
 
-	return decision, matched
+	return "FORBID", "default"
 }
 
-func lower(s string) string {
-	return strings.ToLower(s)
-}
-
-func substr(s string, start, end int) string {
-	if start < 0 {
-		start = 0
-	}
-	if end > len(s) {
-		end = len(s)
-	}
-	if start > end {
-		return ""
-	}
-	return s[start:end]
-}
-
-func Expr() {
+func EVM() {
 	case1()
 	case2()
 	case3()
@@ -192,8 +170,7 @@ func case1() {
 	evmTX := txDecode(rawTx)
 
 	decision, matched := ruleCheck(evmTX)
-
-	log.Printf("Decision: %s (matched rule: %s)\n", decision, matched)
+	log.Printf("Decision: %s (matched rule: %s)", decision, matched)
 }
 
 func case2() {

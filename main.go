@@ -1,15 +1,17 @@
 package main
 
 import (
-	"rule_demo/cel"
-	"rule_demo/expr"
-	"rule_demo/perf_test"
+	"github.com/wujingci-code/rule_demo/cel_demo"
+	"github.com/wujingci-code/rule_demo/expr_demo"
+	"github.com/wujingci-code/rule_demo/perf_test"
 )
 
 func main() {
-	expr.Expr()
-	cel.EVM()
-	cel.UTXO()
+
+	expr_demo.Expr()
+	cel_demo.EVM()
+	cel_demo.UTXO()
+	cel_demo.SOL()
 	perf_test.CelPerfRun()
 	perf_test.ExprPerfRun()
 }

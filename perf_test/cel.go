@@ -3,75 +3,53 @@ package perf_test
 import (
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/common/types/ref"
+	"github.com/google/cel-go/ext"
 )
 
-// EvmTx defines the essential fields for rule evaluation
-
-// CompiledRule holds a precompiled CEL program for a rule
 type CelCompiledRule struct {
 	Name    string
 	Action  string
 	Program cel.Program
 }
 
-// Engine holds the CEL environment and precompiled rules
 type CelEngine struct {
 	env           *cel.Env
 	compiledRules []CelCompiledRule
 }
 
-// NewEngine initializes the CEL environment and compiles rules once
 func NewCelEngine() *CelEngine {
-	// 1) Create a shared CEL environment
 	env, err := cel.NewEnv(
+		ext.Strings(), // string extension
 		cel.Variable("chainId", cel.StringType),
 		cel.Variable("data", cel.StringType),
 		cel.Variable("from", cel.StringType),
 		cel.Variable("to", cel.StringType),
-		cel.Function("lower",
-			cel.Overload("lower_string",
-				[]*cel.Type{cel.StringType}, cel.StringType,
-				cel.UnaryBinding(lowerFn),
-			),
-		),
-		cel.Function("substr",
-			cel.Overload("substr_string_int_int",
-				[]*cel.Type{cel.StringType, cel.IntType, cel.IntType}, cel.StringType,
-				cel.FunctionBinding(substrFn),
-			),
-		),
 	)
 	if err != nil {
 		log.Fatalf("failed to create CEL Env: %v", err)
 	}
 
-	// 2) Define raw rule set
 	rules := []struct {
 		Name      string
 		Condition string
 		Action    string
 	}{
 		{"limit to bsc", `chainId != "0x38"`, "FORBID"},
-		{"transfer to self", `lower(to) == lower(from) && data == ""`, "ALLOW"},
+		{"transfer to self", `to.lowerAscii() == from.lowerAscii() && data == ""`, "ALLOW"},
 		{"allowed dex router methods",
-			`lower(to) == "0xb300000b72deaeb607a12d5f54773d1c19c7028d" &&
-             lower(substr(data,0,10)) in ["0xdad12b6c","0xe5e8894b","0x810c705b"]`,
+			`to.lowerAscii() == "0xb300000b72deaeb607a12d5f54773d1c19c7028d" &&
+                data.substring(0,10).lowerAscii() in ["0xdad12b6c","0xe5e8894b","0x810c705b"]`,
 			"ALLOW"},
 		{"allowance receipts",
-			`lower(substr(data,0,10)) == "0x095ea7b3" &&
-             lower(substr(data,32,72)) in ["2bd6471e79b2f5a723731c36837242df4d845ce8",
-                                          "b300000b72deaeb607a12d5f54773d1c19c7028d"]`,
+			`data.substring(0,10).lowerAscii() == "0x095ea7b3" &&
+                data.substring(32,72).lowerAscii() in ["2bd6471e79b2f5a723731c36837242df4d845ce8","b300000b72deaeb607a12d5f54773d1c19c7028d"]`,
 			"ALLOW"},
 		{"default", `true`, "FORBID"},
 	}
 
-	// 3) Precompile each rule into a Program
 	var compiled []CelCompiledRule
 	for _, r := range rules {
 		ast, issues := env.Compile(r.Condition)
@@ -88,10 +66,8 @@ func NewCelEngine() *CelEngine {
 	return &CelEngine{env: env, compiledRules: compiled}
 }
 
-// Evaluate runs precompiled rules against the given raw transaction hex
 func (e *CelEngine) Evaluate(rawTx string) (string, string) {
 	tx := txDecode(rawTx)
-	// Map EvmTx to environment
 	envMap := map[string]interface{}{
 		"chainId": tx.ChainId,
 		"data":    tx.Data,
@@ -99,7 +75,6 @@ func (e *CelEngine) Evaluate(rawTx string) (string, string) {
 		"to":      tx.To,
 	}
 
-	// Evaluate each rule in order
 	for _, rule := range e.compiledRules {
 		out, _, err := rule.Program.Eval(envMap)
 		if err != nil {
@@ -114,45 +89,8 @@ func (e *CelEngine) Evaluate(rawTx string) (string, string) {
 	return "FORBID", "default"
 }
 
-// CEL helper functions
-func lowerFn(arg ref.Val) ref.Val {
-	s, ok := arg.Value().(string)
-	if !ok {
-		return types.NewErr("lower: expected string")
-	}
-	return types.String(strings.ToLower(s))
-}
-
-func substrFn(args ...ref.Val) ref.Val {
-	if len(args) != 3 {
-		return types.NewErr("substr requires 3 args")
-	}
-	s, ok := args[0].Value().(string)
-	if !ok {
-		return types.NewErr("substr: first arg must be string")
-	}
-	start, ok := args[1].Value().(int64)
-	if !ok {
-		return types.NewErr("substr: second arg must be int")
-	}
-	end, ok := args[2].Value().(int64)
-	if !ok {
-		return types.NewErr("substr: third arg must be int")
-	}
-	if start < 0 {
-		start = 0
-	}
-	if end > int64(len(s)) {
-		end = int64(len(s))
-	}
-	if start > end {
-		return types.String("")
-	}
-	return types.String(s[start:end])
-}
-
 func CelPerfRun() {
-	start := time.Now() // 记录开始时间
+	start := time.Now()
 	engine := NewEngine()
 	/*
 		EVM TX
@@ -188,12 +126,12 @@ func CelPerfRun() {
 	*/
 	rawTx3 := "0xf893827e7480887fffffffffffffff9400000000000000000000000000000000000010008708a98b62048c1fa4f340fa01000000000000000000000000ec3c2d51b8a6ca9cf244f709ea3ade0c7b21238f8194a077cdf97272edf854538949358b3e0c8a273e3916240cddc9dca7c368ced57589a076576f0adfb81c42760b8a8733601287a234283bd641344da5842c66f23f3aff"
 
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 1000; i++ {
 		engine.Evaluate(rawTx1)
 		engine.Evaluate(rawTx2)
 		engine.Evaluate(rawTx3)
 	}
 
-	elapsed := time.Since(start) // 计算耗时
-	fmt.Printf("cel perf执行耗时: %s\n", elapsed)
+	elapsed := time.Since(start)
+	fmt.Printf("cel perf: %s\n", elapsed)
 }

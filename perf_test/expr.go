@@ -11,21 +11,17 @@ import (
 	"github.com/expr-lang/expr/vm"
 )
 
-// CompiledRule wraps a precompiled expr.Program
 type CompiledRule struct {
 	Name    string
 	Action  string
 	Program *vm.Program
 }
 
-// Engine precompiles rules once and evaluates multiple times
 type Engine struct {
 	rules []CompiledRule
 }
 
-// NewEngine compiles the rule set into expr.Program instances
 func NewEngine() *Engine {
-	// Base environment template: zero-values and function refs
 	baseEnv := map[string]interface{}{
 		"chainId": "",
 		"data":    "",
@@ -35,7 +31,6 @@ func NewEngine() *Engine {
 		"substr":  substr,
 	}
 
-	// Define raw rules
 	raw := []struct {
 		Name      string
 		Condition string
@@ -66,7 +61,6 @@ func NewEngine() *Engine {
 	return &Engine{rules: compiled}
 }
 
-// Evaluate decodes rawTx, builds env, and applies precompiled rules
 type EvalResult struct {
 	Decision    string
 	MatchedRule string
@@ -93,7 +87,6 @@ func (e *Engine) Evaluate(rawTx string) EvalResult {
 	return EvalResult{Decision: "FORBID", MatchedRule: "default"}
 }
 
-// structToMap converts struct EvmTx to map for expr env
 func structToMap(s interface{}) map[string]interface{} {
 	v := reflect.ValueOf(s)
 	if v.Kind() == reflect.Ptr {
@@ -116,7 +109,6 @@ func structToMap(s interface{}) map[string]interface{} {
 	return out
 }
 
-// lower and substr functions usable in expr DSL
 func lower(s string) string {
 	return strings.ToLower(s)
 }
@@ -135,7 +127,7 @@ func substr(s string, start, end int) string {
 }
 
 func ExprPerfRun() {
-	start := time.Now() // 记录开始时间
+	start := time.Now()
 	engine := NewEngine()
 	/*
 		EVM TX
@@ -171,12 +163,12 @@ func ExprPerfRun() {
 	*/
 	rawTx3 := "0xf893827e7480887fffffffffffffff9400000000000000000000000000000000000010008708a98b62048c1fa4f340fa01000000000000000000000000ec3c2d51b8a6ca9cf244f709ea3ade0c7b21238f8194a077cdf97272edf854538949358b3e0c8a273e3916240cddc9dca7c368ced57589a076576f0adfb81c42760b8a8733601287a234283bd641344da5842c66f23f3aff"
 
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 1000; i++ {
 		engine.Evaluate(rawTx1)
 		engine.Evaluate(rawTx2)
 		engine.Evaluate(rawTx3)
 	}
 
-	elapsed := time.Since(start) // 计算耗时
-	fmt.Printf("expr perf执行耗时: %s\n", elapsed)
+	elapsed := time.Since(start)
+	fmt.Printf("expr perf: %s\n", elapsed)
 }
